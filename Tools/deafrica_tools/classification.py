@@ -36,11 +36,10 @@ def sklearn_flatten(input_xr):
     Reshape a DataArray or Dataset with spatial (and optionally
     temporal) structure into an np.array with the spatial and temporal
     dimensions flattened into one dimension.
-
     This flattening procedure enables DataArrays and Datasets to be used
     to train and predict with sklearn models.
 
-    Last modified: September 2019
+    Last modified: December 2021
 
     Parameters
     ----------
@@ -48,7 +47,6 @@ def sklearn_flatten(input_xr):
         Must have dimensions 'x' and 'y', may have dimension 'time'.
         Dimensions other than 'x', 'y' and 'time' are unaffected by the
         flattening.
-
     Returns
     ----------
     input_np : numpy.array
@@ -56,39 +54,30 @@ def sklearn_flatten(input_xr):
         input_xr.to_array().data), with dimensions 'x','y' and 'time'
         flattened into a single dimension, which is the first axis of
         the returned array. input_np contains no NaNs.
-
     """
-    # cast input Datasets to DataArray
+
+    # Cast input Datasets to DataArray.
     if isinstance(input_xr, xr.Dataset):
         input_xr = input_xr.to_array()
-
-    # stack across pixel dimensions, handling timeseries if necessary
-    if "time" in input_xr.dims:
-        stacked = input_xr.stack(z=["x", "y", "time"])
-    else:
-        stacked = input_xr.stack(z=["x", "y"])
-
-    # finding 'bands' dimensions in each pixel - these will not be
-    # flattened as their context is important for sklearn
-    pxdims = []
-    for dim in stacked.dims:
-        if dim != "z":
-            pxdims.append(dim)
-
-    # mask NaNs - we mask pixels with NaNs in *any* band, because
-    # sklearn cannot accept NaNs as input
-    mask = np.isnan(stacked)
-    if len(pxdims) != 0:
-        mask = mask.any(dim=pxdims)
-
-    # turn the mask into a numpy array (boolean indexing with xarrays
-    # acts weird)
-    mask = mask.data
-
-    # the dimension we are masking along ('z') needs to be the first
-    # dimension in the underlying np array for the boolean indexing to work
-    stacked = stacked.transpose("z", *pxdims)
-    input_np = stacked.data[~mask]
+        
+    # Fill the Nan's in the dataset.
+    # input_xr = input_xr.fillna(-9999)
+  
+    # Get the input_xr's data as a numpy.ndarray.
+    input_xr_npa = input_xr.values
+    
+    # Define function to flatten and drop NaNs from a numpy array. 
+    def flatten_drop_nan(np_array):
+        np_flattened = np_array.flatten(order="F")
+        np_drop_nan = np_flattened[np.logical_not(np.isnan(np_flattened))]
+        return np_drop_nan
+   
+    # Flatten the numpy array.
+    input_xr_flattened_npa = np.array([flatten_drop_nan(input_xr_npa[i]) for i in range(input_xr_npa.shape[0])])
+  
+    # Transpose the flattened numpy array to get the shape (n_samples, n_features)
+    # where n_features is the number of bands and n_samples is the total number of pixels in each band.
+    input_np = input_xr_flattened_npa.T
 
     return input_np
 
@@ -98,17 +87,17 @@ def sklearn_unflatten(output_np, input_xr):
     Reshape a numpy array with no 'missing' elements (NaNs) and
     'flattened' spatiotemporal structure into a DataArray matching the
     spatiotemporal structure of the DataArray
-
     This enables an sklearn model's prediction to be remapped to the
     correct pixels in the input DataArray or Dataset.
 
-    Last modified: September 2019
+    Last modified: November 2021
 
     Parameters
     ----------
     output_np : numpy.array
         The first dimension's length should correspond to the number of
-        valid (non-NaN) pixels in input_xr.
+        pixels in input_xr.
+
     input_xr : xarray.DataArray or xarray.Dataset
         Must have dimensions 'x' and 'y', may have dimension 'time'.
         Dimensions other than 'x', 'y' and 'time' are unaffected by the
@@ -118,52 +107,83 @@ def sklearn_unflatten(output_np, input_xr):
     ----------
     output_xr : xarray.DataArray
         An xarray.DataArray with the same dimensions 'x', 'y' and 'time'
-        as input_xr, and the same valid (non-NaN) pixels. These pixels
+        as input_xr, and the same number of pixels. The pixels
         are set to match the data in output_np.
-
     """
 
-    # the output of a sklearn model prediction should just be a numpy array
-    # with size matching x*y*time for the input DataArray/Dataset.
+    # The  expected output of a sklearn model prediction should just be
+    # a 1 dimensional numpy array, output_np, with the size/columns matching
+    # the y * x * time  for the dimensions of the input_xr DataArray/Dataset.
 
-    # cast input Datasets to DataArray
+    # Cast input Datasets to DataArray.
     if isinstance(input_xr, xr.Dataset):
         input_xr = input_xr.to_array()
 
-    # generate the same mask we used to create the input to the sklearn model
+    # Work around for input_xr Dataset with geographic coordinate reference system.
+    if input_xr.geobox.crs.geographic:
+        input_xr = input_xr.rename({"longitude": "x", "latitude": "y"})
+
+    # Get the input_xr's data as a numpy.ndarray.
+    input_xr_npa = input_xr.values
+    
+    # Get the data type of the input_xr_npa numpy array.
+    data_type = input_xr_npa.dtype
+
+    # Flatten the input_xr_npa numpy array.
+    input_xr_flattened_npa = np.array([input_xr_npa[i].flatten(order="F") for i in range(input_xr_npa.shape[0])])
+
+    # Transpose the input_xr_flattened_npa numpy array to get the shape (n_samples, n_features)
+    # where n_features is the number of bands and n_samples is the total number of pixels in each band.
+    input_np = input_xr_flattened_npa.T
+
+    # Create a mask of the Nans.
+    mask = np.isnan(input_np)
+
+    # Create an empty numpy array..
+    output_xr_np = np.empty(input_np.shape, dtype=data_type)
+
+    # Use the mask to put the data in all the right places. 
+    for i in range(output_xr_np.shape[1]):
+        arr = output_xr_np[:,i]
+        mask_arr = mask[:,i]
+        arr[~mask_arr] = output_np[:,i]
+        arr[mask_arr] = np.nan
+
+    # Reshape the output_np numpy array.
+    output_xr_np = output_xr_np.T.reshape(input_xr_npa.shape, order="F")
+
+    # Get the dimensions for output_xr.
     if "time" in input_xr.dims:
-        stacked = input_xr.stack(z=["x", "y", "time"])
+        dims = ["variable", "time", "y", "x"]
+        coords = dict(
+            time=(["time"], input_xr.coords["time"].values),
+            y=(["y"], input_xr.coords["y"].values),
+            x=(["x"], input_xr.coords["x"].values),
+            spatial_ref=input_xr.coords["spatial_ref"].values,
+            variable=(["variable"], [f"band_{i}" for i in range(output_xr_np.shape[0])]),
+        )
     else:
-        stacked = input_xr.stack(z=["x", "y"])
+        dims = ["variable", "y", "x"]
+        coords = dict(
+            y=(["y"], input_xr.coords["y"].values),
+            x=(["x"], input_xr.coords["x"].values),
+            spatial_ref=input_xr.coords["spatial_ref"].values,
+            variable=(["variable"], [f"band_{i}" for i in range(output_xr_np.shape[0])]),
+        )
 
-    pxdims = []
-    for dim in stacked.dims:
-        if dim != "z":
-            pxdims.append(dim)
-
-    mask = np.isnan(stacked)
-    if len(pxdims) != 0:
-        mask = mask.any(dim=pxdims)
-
-    # handle multivariable output
-    output_px_shape = ()
-    if len(output_np.shape[1:]):
-        output_px_shape = output_np.shape[1:]
-
-    # use the mask to put the data in all the right places
-    output_ma = np.ma.empty((len(stacked.z), *output_px_shape))
-    output_ma[~mask] = output_np
-    output_ma[mask] = np.ma.masked
-
-    # set the stacked coordinate to match the input
+    # Convert the output_np numpy array into a xarray DataArray.
     output_xr = xr.DataArray(
-        output_ma,
-        coords={"z": stacked["z"]},
-        dims=["z", *["output_dim_" + str(idx) for idx in range(len(output_px_shape))]],
+        data=output_xr_np,
+        dims=dims,
+        coords=coords,
+        attrs=input_xr.attrs,
     )
-
-    output_xr = output_xr.unstack()
-
+    # Assign the output
+    output_xr = assign_crs(output_xr, input_xr.geobox.crs)
+    
+    # Work around for input_xr Dataset with geographic coordinate reference system.
+    if output_xr.geobox.crs.geographic:
+        output_xr= output_xr.rename({"x": "longitude" , "y": "latitude"})
     return output_xr
 
 
